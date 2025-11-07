@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Channel Dashboard</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Custom styles for Inter font and nice scrollbars */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a1a2e; /* Dark theme background */
+            color: #ffffff;
+        }
+        /* Custom scrollbar for better aesthetics */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #2c2c4a; }
+        ::-webkit-scrollbar-thumb { background: #555577; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #777799; }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-[#e94560] mb-2">Channel Tracker Dashboard</h1>
+            <p class="text-gray-400">Paste your API Key and a list of YouTube RSS links or Channel IDs below.</p>
+        </header>
+
+        <!-- Configuration Panel -->
+        <div class="bg-[#2c2c4a] p-6 rounded-xl shadow-2xl mb-8">
+            <h2 class="text-2xl font-semibold mb-4 border-b border-[#555577] pb-2 text-white">1. Configuration</h2>
+
+            <div class="mb-4">
+                <label for="apiKey" class="block text-sm font-medium text-gray-300 mb-2">YouTube Data API Key (v3)</label>
+                <input type="text" id="apiKey" placeholder="Paste your API Key here (starts with AIza...)" class="w-full p-3 rounded-lg bg-[#1a1a2e] border border-[#555577] focus:ring-[#e94560] focus:border-[#e94560] text-white transition duration-200">
+                <p class="text-xs text-gray-500 mt-1">This key is required to fetch channel details. <a href="https://developers.google.com/youtube/v3/getting-started" target="_blank" class="text-blue-400 hover:text-blue-300">Get a Key</a></p>
+            </div>
+
+            <div class="mb-4">
+                <label for="linksText" class="block text-sm font-medium text-gray-300 mb-2">2. RSS Links / Channel IDs</label>
+                <textarea id="linksText" rows="6" placeholder="Paste your list of RSS links or Channel IDs, one per line. Example:&#10;https://www.youtube.com/feeds/videos.xml?channel_id=UC-lHJZR3Gqxm24_Vd_AJ5Yw&#10;UCBR8-60S-2hD3SvwVp6VlqA&#10;https://www.youtube.com/channel/UCHkj014c_4EQf4zW1k2F2Lg" class="w-full p-3 rounded-lg bg-[#1a1a2e] border border-[#555577] focus:ring-[#e94560] focus:border-[#e94560] text-white resize-y transition duration-200"></textarea>
+            </div>
+
+            <button onclick="loadChannels()" class="w-full bg-[#e94560] text-white font-bold py-3 px-4 rounded-lg shadow-lg hover:bg-[#ff6e8a] transition duration-300 transform hover:scale-[1.01] focus:outline-none focus:ring-4 focus:ring-[#e94560] focus:ring-opacity-50">
+                <span id="loadButtonText">Load Channels</span>
+            </button>
+        </div>
+
+        <!-- Channel Display Area -->
+        <h2 class="text-2xl font-semibold mt-8 mb-4 border-b border-[#555577] pb-2 text-white">3. Channel List</h2>
+        <div id="loadingIndicator" class="text-center text-[#e94560] font-medium hidden">
+            <svg class="animate-spin h-6 w-6 mr-3 inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Fetching channel data...
+        </div>
+        <div id="channel-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <!-- Channel cards will be inserted here -->
+        </div>
+        <div id="error-message" class="text-red-400 mt-4 p-4 bg-[#3a1c3d] rounded-lg hidden"></div>
+    </div>
+
+    <script>
+        const API_URL = 'https://www.googleapis.com/youtube/v3/channels';
+        const MAX_IDS_PER_REQUEST = 50;
+
+        // Utility to handle exponential backoff for API retries
+        const exponentialBackoffFetch = async (url, options, retries = 3) => {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.status === 429 && i < retries - 1) { // Too Many Requests
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                        console.warn(`Rate limit hit. Retrying in ${delay / 1000}s...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(`API Error ${response.status}: ${errorData.error.message}`);
+                    }
+                    return response;
+                } catch (error) {
+                    if (i === retries - 1) throw error;
+                    console.error(`Fetch failed on attempt ${i + 1}:`, error);
+                }
+            }
+            throw new Error("API request failed after all retries.");
+        };
+
+
+        // Function to extract unique Channel IDs from various input formats
+        function extractChannelIds(text) {
+            const lines = text.split(/[\n,]/).map(line => line.trim()).filter(line => line.length > 0);
+            const ids = new Set();
+
+            lines.forEach(line => {
+                // 1. Check for standard Channel ID (UC...)
+                if (line.match(/^UC[a-zA-Z0-9_-]{22}$/)) {
+                    ids.add(line);
+                    return;
+                }
+
+                // 2. Check for channel_id in RSS links (most common format)
+                let match = line.match(/channel_id=([^&]+)/);
+                if (match) {
+                    ids.add(match[1]);
+                    return;
+                }
+
+                // 3. Check for 'channel/' in standard URL
+                match = line.match(/\/channel\/([a-zA-Z0-9_-]{24})/);
+                if (match) {
+                    ids.add(match[1]);
+                    return;
+                }
+            });
+
+            return Array.from(ids);
+        }
+
+        // Function to format numbers (e.g., 1234567 -> 1.23M)
+        function formatNumber(num) {
+            if (num >= 1000000) {
+                return (num / 1000000).toFixed(2) + 'M';
+            } else if (num >= 1000) {
+                return (num / 1000).toFixed(1) + 'K';
+            }
+            return num.toLocaleString();
+        }
+
+        // Function to render a single channel card
+        function createChannelCard(channel) {
+            const snippet = channel.snippet;
+            const statistics = channel.statistics;
+            const channelId = channel.id;
+
+            const subscriberCount = formatNumber(statistics.subscriberCount);
+            const videoCount = formatNumber(statistics.videoCount);
+            const viewCount = formatNumber(statistics.viewCount);
+
+            return `
+                <div class="bg-[#1a1a2e] rounded-xl overflow-hidden shadow-xl hover:shadow-2xl transition duration-300 border border-[#555577]">
+                    <div class="p-5 flex items-start space-x-4">
+                        <a href="https://www.youtube.com/channel/${channelId}" target="_blank" class="flex-shrink-0">
+                            <img src="${snippet.thumbnails.default.url}" onerror="this.onerror=null; this.src='https://placehold.co/88x88/2c2c4a/ffffff?text=No+Img';"
+                                 alt="${snippet.title} thumbnail"
+                                 class="w-14 h-14 rounded-full object-cover border-2 border-[#e94560]">
+                        </a>
+                        <div class="flex-grow min-w-0">
+                            <a href="https://www.youtube.com/channel/${channelId}" target="_blank" class="text-lg font-bold text-white hover:text-[#e94560] truncate block">${snippet.title}</a>
+                            <p class="text-sm text-gray-400 mb-2 truncate">${snippet.customUrl ? '@' + snippet.customUrl : snippet.description.substring(0, 50) + '...'}</p>
+
+                            <!-- Stats -->
+                            <div class="flex flex-wrap text-xs font-semibold space-x-3 text-gray-300 mt-2">
+                                <span class="flex items-center">
+                                    <svg class="w-4 h-4 mr-1 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14c-4.418 0-8 3.582-8 8h16c0-4.418-3.582-8-8-8z"></path></svg>
+                                    ${statistics.hiddenSubscriberCount ? 'Hidden' : subscriberCount} Subs
+                                </span>
+                                <span class="flex items-center">
+                                    <svg class="w-4 h-4 mr-1 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"></path></svg>
+                                    ${videoCount} Videos
+                                </span>
+                                <span class="flex items-center">
+                                    <svg class="w-4 h-4 mr-1 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                                    ${viewCount} Views
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Main function to orchestrate the loading process
+        async function loadChannels() {
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const linksText = document.getElementById('linksText').value.trim();
+            const channelListDiv = document.getElementById('channel-list');
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const errorDiv = document.getElementById('error-message');
+            const loadButton = document.getElementById('loadButtonText');
+
+            channelListDiv.innerHTML = '';
+            errorDiv.classList.add('hidden');
+
+            if (!apiKey) {
+                errorDiv.textContent = 'Please enter your YouTube Data API Key.';
+                errorDiv.classList.remove('hidden');
+                return;
+            }
+
+            const uniqueIds = extractChannelIds(linksText);
+
+            if (uniqueIds.length === 0) {
+                errorDiv.textContent = 'Could not find any valid Channel IDs (UC...) in the provided text. Please check your links/input.';
+                errorDiv.classList.remove('hidden');
+                return;
+            }
+
+            loadingIndicator.classList.remove('hidden');
+            loadButton.textContent = 'Loading...';
+            const buttonElement = loadButton.closest('button');
+            buttonElement.disabled = true;
+
+            const batches = [];
+            for (let i = 0; i < uniqueIds.length; i += MAX_IDS_PER_REQUEST) {
+                batches.push(uniqueIds.slice(i, i + MAX_IDS_PER_REQUEST));
+            }
+
+            let allChannels = [];
+            try {
+                for (const batch of batches) {
+                    const idsString = batch.join(',');
+                    const url = `${API_URL}?part=snippet,statistics&id=${idsString}&key=${apiKey}`;
+
+                    const response = await exponentialBackoffFetch(url, { method: 'GET' });
+                    const data = await response.json();
+
+                    if (data.items) {
+                        allChannels = allChannels.concat(data.items);
+                    }
+                }
+
+                if (allChannels.length > 0) {
+                    channelListDiv.innerHTML = allChannels.map(createChannelCard).join('');
+                } else {
+                    channelListDiv.innerHTML = '<p class="text-center text-gray-500 col-span-full">No channel details were found for the provided IDs. Ensure the IDs are correct and your API key is valid.</p>';
+                }
+
+            } catch (error) {
+                console.error("Failed to load channels:", error);
+                errorDiv.textContent = `Error fetching data: ${error.message}. Please check your API key, channel IDs, and API quota limits.`;
+                errorDiv.classList.remove('hidden');
+            } finally {
+                loadingIndicator.classList.add('hidden');
+                loadButton.textContent = 'Load Channels';
+                buttonElement.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
